@@ -1,0 +1,253 @@
+---
+title: "Informal Sensitivity Analysis"
+format:
+  revealjs:
+    theme: solarized
+    resources: ["img/"]
+editor: visual
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+
+library(purrr)
+
+library(ggpubr)
+
+library(here)
+```
+
+# Solar
+
+```{r solar, echo=TRUE}
+
+source(here("R/solarpv.R"))
+
+
+# read in R formatted data
+load(here("Data/sierraczosolar.rda"))
+
+# lets room the first and years since we know from last class that they are incomplete
+
+sierraczosolar <- sierraczosolar %>% subset(year > 1944 & year < 1954)
+# run the model
+solarpv(area = 0.1, solar = sierraczosolar, clr = "green", eunit = "W")
+```
+
+## Sensitivity Analysis with *ethresh* {.scrollable}
+
+There is a threshold radiation below which efficiency declines
+
+- Last class we used *eff*
+
+-   Assume +-15% uncertainty in *ethresh* parameter (uniform distribution)
+
+-   Default value (from the function) is 10,000
+
+-   Code so that its easy to change the uncertainty
+
+-  Think about a data structure to allow us to see how uncertainty impacts annual power estimation for each year, or mean annual power generation
+
+
+```{r ethresh, echo=TRUE}
+# lets try sensitivity analysis again,
+# ethresh - is defaulted to 10000; lets try +- 15%
+# lets try 40 samples
+# assume a uniform distribution - we don't know anything about variation
+deviation <- 0.15
+base_thresh <- 10000
+ethresh <- runif(
+  min = base_thresh - deviation * base_thresh,
+  max = base_thresh + deviation * base_thresh, n = 40
+)
+
+# now run our model for the parameters
+site2 <- ethresh %>% map(~ solarpv(
+  area = 0.1,
+  solar = sierraczosolar, clr = "green",
+  eunit = "W", g = FALSE, etype = "direct", eff = 0.8, PR = 0.75,
+  ethresh = .x
+))
+
+
+# extract a useful data structure,lets say we want  just the annual data (not the mean), and then reformat as a data frame with nice column names
+tmp <- map_df(site2, `[`, c("annual"))
+site2df <- data.frame(
+  year = tmp$annual$year,
+  elect = tmp$annual$elect
+)
+
+# now we could plot
+ggplot(
+  site2df,
+  aes(as.factor(year), elect, group = year)
+) +
+  geom_boxplot() +
+  labs(y = "Electricity generated in W", x = "Year")
+
+# we also might want to see mean electricity generation across parameter uncertainty
+mean_elect <- map_df(site2, `[`, c("mean"))
+
+# because there is only 1 value for each ethresh we can add as a column
+mean_elect$ethresh <- ethresh
+
+
+p1 <- ggplot(mean_elect, aes(y=mean)) +
+  geom_boxplot() +
+  labs(x = "Mean Annual Electricity W")
+p1
+
+# or we might want to see how electricity varies with parameter value
+p2 <- ggplot(mean_elect, aes(ethresh, mean)) +
+  geom_point(cex = 2, col = "orange") +
+  labs(y = "Mean Annual Electricity W", x = "Threshold Radiation (kJ/m2)  \nabove which energy production is more efficient")
+p2
+```
+
+## Sensitivity to Energy Threshold is not linear
+
+Sensitivity to parameters that effect a theshold is often complex (and not linear!)
+
+```{r, echo=TRUE}
+ggarrange(p1, p2)
+```
+
+## Combined sensivitivity analysis
+
+-   *eff*
+
+-   *ethresh*
+
+Sample from both of them - each time we run the model we vary both of the parameters
+
+Then create plots to show the impact of parameter uncertainty
+
+## Combined parameter sensitivity
+
+Two possible approaches
+
+-   *for*
+-   *pmap* from purrr (when you want to vary more than one input to the model)
+
+## using *pmap* {.scrollable}
+
+```{r secondsensitivity, echo=TRUE}
+# generate samples for both parameters
+nsamples <- 300
+deviation <- 0.15
+base_thresh <- 10000
+ethresh <- runif(
+  min = base_thresh - deviation * base_thresh,
+  max = base_thresh + deviation * base_thresh, n = nsamples
+)
+
+eff <- rnorm(mean = 0.6, sd = 0.1, n = nsamples)
+
+# put samples together
+parms <- cbind.data.frame(eff, ethresh)
+
+# use pmap
+# takes function name and then names of all parameters that don't change
+results <- parms %>% pmap(solarpv,
+  area = 0.1,
+  solar = sierraczosolar, clr = "green",
+  eunit = "W", g = FALSE, etype = "direct"
+)
+
+results[[1]]
+length(results)
+
+# now we can extract results from the list as above
+mean_elect <- map_df(results, `[`, c("mean"))
+# and we can add the parameter values for each run
+mean_elect <- cbind.data.frame(mean_elect, parms)
+
+# plot - pick one of the 2 parameter as a color
+# try switching which parameter used for color
+
+p1 <- ggplot(mean_elect, aes(ethresh, mean, col = eff)) +
+  geom_point(cex = 2) +
+  labs(y = "Mean Annual Electricity W", x = "Threshold Radiation (kJ/m2)  \n above which energy production is more efficient")
+p1
+
+p2 <- ggplot(mean_elect, aes(eff, mean, col = ethresh)) +
+  geom_point(cex = 2) +
+  labs(y = "Mean Annual Electricity W", x = "Efficiency")
+p2
+
+
+# extract annual
+# plot total uncertainty due to both parameters
+tmp <- map_df(results, `[`, c("annual"))
+solar_annual_elect <- as.data.frame(tmp$annual$year)
+colnames(solar_annual_elect) <- "year"
+solar_annual_elect$elect <- tmp$annual$elect
+
+ggplot(solar_annual_elect, aes(year, elect, group = year)) +
+  geom_boxplot() +
+  labs(y = "Electricity generated in W")
+
+# save this model output for next lecture
+save(solar_annual_elect, file = here("Data/annual_elect_solar.rda"))
+```
+
+# Sensitivity to two different parameters
+
+-   note how one parameter **eff** overshadows the response to *"ethresh*
+
+-   note the linear response to *eff*
+
+
+## plot
+```{r}
+ggarrange(p1, p2)
+```
+
+## Additional notes {.scrollable} 
+
+Using a *For* Loop for sensitivity analysis
+
+```{r}
+# using a for loop
+# start by creating a data structures to hold results, separate
+# for scenario mean and annual values
+mean_elect_for <- rep(NA, times = nsamples)
+# for annual we need rows as years, columns for samples
+years <- unique(sierraczosolar$year)
+annual_elect_for <- as.data.frame(matrix(ncol = nsamples, nrow = length(years)))
+annual_elect_for$year <- years
+
+
+for (i in 1:nsamples) {
+  res <- solarpv(
+    area = 0.1, solar = sierraczosolar,
+    clr = "green", eunit = "W", g = FALSE, etype = "direct",
+    ethresh = parms$ethresh[i],
+    eff = parms$eff[i]
+  )
+
+  annual_elect_for[, i] <- res$annual$elect
+  mean_elect_for[i] <- res$mean
+}
+
+# plot
+me <- cbind.data.frame(mean = mean_elect_for, parms)
+ggplot(me, aes(eff, mean, col = ethresh)) +
+  geom_point(cex = 2) +
+  labs(y = "Mean Annual Electricity W", x = "Efficiency")
+
+tmp <- annual_elect_for %>% pivot_longer(cols = -c(year))
+
+# get rid of that pesky first year
+tmp <- subset(tmp, tmp$year > 1944)
+
+ggplot(tmp, aes(as.factor(year), value)) +
+  geom_boxplot() +
+  labs(y = "Mean Annual Electricity W", x = "Year")
+```
+
+
+# Before next Tuesday I'll add a part 2 to this lecture
+
+ In preparation, go through informal_sensitivity.qmd and informal_sensitivity2.qmd make sure you understand the code
